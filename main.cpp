@@ -4,13 +4,15 @@
 #define DEBUG_REDUCE_WORKER 1
 
 #define WORD_MAX_LENGTH 8
-#define TAG_COMM_PAIR_LIST 50 // Fix reuse
+#define TAG_MAP_TO_REDUCE_SIZE 10
+#define TAG_COMM_PAIR_LIST 11
 
 #include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <iostream>
 #include <string.h>
+#include <functional> //for std::hash
 #include <vector>
 #include <fstream>
 #include <unordered_map>
@@ -127,8 +129,8 @@ int main(int argc, char** argv) {
             sizes[i] = currFileSize;
 
             int workerToSendTo = (i % num_map_workers) + 1;
-            int sizeTag = i * 2;
-            int fileTag = i * 2 + 1;
+            int sizeTag = 1;
+            int fileTag = 2;
 
 #if DEBUG_MASTER
             std::cout << "Rank (MASTER) Sending File " << filePath << " to MapWorker Rank = " << workerToSendTo << ", SizeTag = " << sizeTag << ", FileTag = " << fileTag << std::endl;
@@ -164,8 +166,8 @@ int main(int argc, char** argv) {
         int temp = mapWorkerFilesToProcess[mapWorkerIdx];
         /* While this map worker still has stuff to process. */
         while (temp > 0) {
-            int sizeTagToExpect = fileIdxToExpect * 2;
-            int fileTagToExpect = fileIdxToExpect * 2 + 1;
+            int sizeTagToExpect = 1;
+            int fileTagToExpect = 2;
             //std::cout << "Rank (" << rank << "), Expecting File " << fileIdxToExpect << ", SizeTag = " << sizeTagToExpect << ", FileTag = " << fileTagToExpect << std::endl;
             int size;
             char* fileContent;
@@ -187,19 +189,23 @@ int main(int argc, char** argv) {
             /* Do the actual Mapping */
             MapTaskOutput* res = map(fileContent);
 
+            std::hash<std::string> hasher;
             for (int reduceWorkerIdx = 0; reduceWorkerIdx < num_reduce_workers; reduceWorkerIdx++) {
                 KeyValue outgoingKVs[res->len];
                 int sizeOf = 0;
                 for (int i = 0; i < res->len; i++) {
-                    if (i % num_reduce_workers != reduceWorkerIdx) {
+                    KeyValue kv = (res -> kvs)[i];
+                    std::string str(kv.key);
+                    auto hashed = hasher(str); //returns std::size_t
+                    if (hashed % num_reduce_workers != reduceWorkerIdx) {
                         continue;
                     }
-                    KeyValue kv = (res -> kvs)[i];
                     outgoingKVs[sizeOf].val = kv.val;
                     strcpy(outgoingKVs[sizeOf].key, kv.key);
                     sizeOf++;
                 }
                 int reduceWorkerRank = reduceWorkerIdx + 1 + num_map_workers;
+                MPI_Send(&sizeOf, 1, MPI_INT, reduceWorkerRank, TAG_MAP_TO_REDUCE_SIZE, MPI_COMM_WORLD); // size
                 MPI_Send(outgoingKVs, sizeOf, istruct, reduceWorkerRank, TAG_COMM_PAIR_LIST, MPI_COMM_WORLD);
             }
 
@@ -215,13 +221,9 @@ int main(int argc, char** argv) {
         Send sentinal value to reduce worker to indicate that this map worker is done
         */
         for (int reduceWorkerIdx = 0; reduceWorkerIdx < num_reduce_workers; reduceWorkerIdx++) {
-            KeyValue outgoingKVs[1];
-            int sizeOf = 0;
-            outgoingKVs[sizeOf].val = -1;
-            strcpy(outgoingKVs[sizeOf].key, "123");
-            sizeOf++;
+            int sizeOf = -1;
             int reduceWorkerRank = reduceWorkerIdx + 1 + num_map_workers;
-            MPI_Send(outgoingKVs, sizeOf, istruct, reduceWorkerRank, TAG_COMM_PAIR_LIST, MPI_COMM_WORLD);
+            MPI_Send(&sizeOf, 1, MPI_INT, reduceWorkerRank, TAG_MAP_TO_REDUCE_SIZE, MPI_COMM_WORLD); // size
         }
 
 #if DEBUG_MAP_WORKER
@@ -237,17 +239,19 @@ int main(int argc, char** argv) {
 
         // reducer keeps receiving values till all map workers are done
         while (mapWorkersDone < num_map_workers) {
-            int sizeOf = 0;
-            int incomingKVSize = 26; // fix hardcoded res->len
+            int incomingKVSize = 1;
+            // Wait for size msg from MPI_ANY_SOURCE
+            MPI_Recv(&incomingKVSize, 1, MPI_INT, MPI_ANY_SOURCE, TAG_MAP_TO_REDUCE_SIZE, MPI_COMM_WORLD, &status);
+            if (incomingKVSize == -1) {
+                // sentinal value sent by map worker
+                mapWorkersDone++;
+                continue;
+            }
             KeyValue incomingKVs[incomingKVSize]; 
-            MPI_Recv(incomingKVs, incomingKVSize, istruct, MPI_ANY_SOURCE, TAG_COMM_PAIR_LIST, MPI_COMM_WORLD, &status);
-            MPI_Get_count(&status, istruct, &sizeOf);
-            for (int i = 0; i < sizeOf; i++) {
+            // then wait for KV array from status.MPI_SOURCE of size msg
+            MPI_Recv(incomingKVs, incomingKVSize, istruct, status.MPI_SOURCE, TAG_COMM_PAIR_LIST, MPI_COMM_WORLD, &status);
+            for (int i = 0; i < incomingKVSize; i++) {
                 KeyValue kv = (incomingKVs)[i];
-                if (kv.val == -1) { // sentinal value sent by map worker
-                    mapWorkersDone++;
-                    break;
-                }
                 std::string key(kv.key);
                 if (!buffer.count(key)) {
                     buffer[key] = {};
@@ -256,12 +260,13 @@ int main(int argc, char** argv) {
             }
             
         }
+        
 
         // process buffer when all map workers are done
         KeyValue outgoingKVs[buffer.size()];
         int sizeOf = 0;
         for (const auto&[key, value] : buffer) {
-            char tempKey[8];
+            char tempKey[8]; // TODO: is hardcoded 8 okay? It is hardcoded in tasks.KeyValue struct
             strcpy(tempKey, key.c_str());
             int tempVals[value.size()];
             for (int i = 0; i < value.size(); i++) {
@@ -278,8 +283,7 @@ int main(int argc, char** argv) {
 
 
 #if DEBUG_REDUCE_WORKER
-        printf("Rank (%d): This is a reduce worker process\n", rank);
-        printf("<>(%d): Index of reduce worker is done\n", reduceWorkerIdx);
+        printf("Rank (%d): This is a reducer worker is done\n", rank);
 #endif
     }
 
