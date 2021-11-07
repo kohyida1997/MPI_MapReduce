@@ -144,12 +144,14 @@ int main(int argc, char** argv) {
         myfile.open (output_file_name);
 
         for (int reduceWorkerIdx = 0; reduceWorkerIdx < num_reduce_workers; reduceWorkerIdx++) {
-            int sizeOf = 0;
-            int incomingKVSize = 26; // fix hardcoded res->len
+
+            int incomingKVSize = 1;
+            // Wait for size msg from MPI_ANY_SOURCE
+            MPI_Recv(&incomingKVSize, 1, MPI_INT, MPI_ANY_SOURCE, TAG_MAP_TO_REDUCE_SIZE, MPI_COMM_WORLD, &status);
             KeyValue incomingKVs[incomingKVSize]; 
-            MPI_Recv(incomingKVs, incomingKVSize, istruct, MPI_ANY_SOURCE, TAG_COMM_PAIR_LIST, MPI_COMM_WORLD, &status);
-            MPI_Get_count(&status, istruct, &sizeOf);
-            for (int i = 0; i < sizeOf; i++) {
+            // then wait for KV array from status.MPI_SOURCE of size msg
+            MPI_Recv(incomingKVs, incomingKVSize, istruct, status.MPI_SOURCE, TAG_COMM_PAIR_LIST, MPI_COMM_WORLD, &status);
+            for (int i = 0; i < incomingKVSize; i++) {
                 KeyValue kv = (incomingKVs)[i];
                 myfile << kv.key << " " << kv.val << std::endl;
             }
@@ -279,6 +281,7 @@ int main(int argc, char** argv) {
         }
 
         // send reduced value to master
+        MPI_Send(&sizeOf, 1, MPI_INT, 0, TAG_MAP_TO_REDUCE_SIZE, MPI_COMM_WORLD); // size
         MPI_Send(outgoingKVs, sizeOf, istruct, 0, TAG_COMM_PAIR_LIST, MPI_COMM_WORLD);
 
 
