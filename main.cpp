@@ -3,16 +3,20 @@
 #define DEBUG_MASTER 0
 #define DEBUG_REDUCE_WORKER 1
 
-#define WORD_MAX_LENGTH 8
-#define TAG_MAP_TO_REDUCE_SIZE 10
-#define TAG_COMM_PAIR_LIST 11
+#define KEY_LENGTH 8 // use hardcoded value from tasks.h // char key[8];
+#define TAG_MASTER_TO_MAP_SIZE 1
+#define TAG_MASTER_TO_MAP_FILE 2
+#define TAG_MAP_TO_REDUCE_SIZE 11
+#define TAG_MAP_TO_REDUCE_DICT 12
+#define TAG_REDUCE_TO_MASTER_SIZE 21
+#define TAG_REDUCE_TO_MASTER_DICT 22
 
 #include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <iostream>
 #include <string.h>
-#include <functional> //for std::hash
+#include <functional>
 #include <vector>
 #include <fstream>
 #include <unordered_map>
@@ -42,7 +46,7 @@ char* readFileIntoCharBuffer(const char* pathToRead, int* size) {
     return targetBuffer;
 }
 
- MPI_Status status;
+
 
 int main(int argc, char** argv) {
     constexpr int MASTER_RANK = 0;
@@ -54,6 +58,13 @@ int main(int argc, char** argv) {
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
+    if (world_size < 3) {
+        std::cout << "Need world_size to be at least 3. Use -np 3 as cmd line arg" << std::endl;
+        //Clean up
+        MPI_Finalize();
+        return 0;
+    }
+
     // Get command-line params
     char *input_files_dir = argv[1];
     int num_files = atoi(argv[2]);
@@ -61,6 +72,13 @@ int main(int argc, char** argv) {
     int num_reduce_workers = atoi(argv[4]);
     char *output_file_name = argv[5];
     int map_reduce_task_num = atoi(argv[6]);
+
+    if ((1 + num_map_workers + num_reduce_workers) > world_size) {
+        num_map_workers = world_size - 2;
+        num_reduce_workers = 1;
+    } else if ((1 + num_map_workers + num_reduce_workers) < world_size) {
+        num_map_workers = world_size - 1 - num_reduce_workers;
+    }
 
     // Identify the specific map function to use
     MapTaskOutput* (*map) (char*);
@@ -87,20 +105,19 @@ int main(int argc, char** argv) {
         mapWorkerFilesToProcess[i % num_map_workers] += 1;
     }
 
-    // --------- DEFINE THE STRUCT DATA TYPE TO SEND // modified from
-    // https://github.com/adhithadias/map-reduce-word-count-openmp-mpi/blob/main/mpi_parallel.c 
+    // MPI struct to transfer KeyValue struct from one node to another node
     const int nfields = 2;
-    MPI_Aint disps[nfields];
-    int blocklens[] = {WORD_MAX_LENGTH, 1};
+    MPI_Aint displacements[nfields];
+    int blocklens[] = {KEY_LENGTH, 1};
     MPI_Datatype types[] = {MPI_CHAR, MPI_INT};
 
-    disps[0] = offsetof(KeyValue, key);
-    disps[1] = offsetof(KeyValue, val);
+    displacements[0] = offsetof(KeyValue, key);
+    displacements[1] = offsetof(KeyValue, val);
 
-    MPI_Datatype istruct;
-    MPI_Type_create_struct(nfields, blocklens, disps, types, &istruct);
-    MPI_Type_commit(&istruct);
-    // ---
+    MPI_Datatype keyValueMsg;
+    MPI_Type_create_struct(nfields, blocklens, displacements, types, &keyValueMsg);
+    MPI_Type_commit(&keyValueMsg);
+
 
 #if DEBUG_WORK_DISTRIBUTION
     if (rank == MASTER_RANK) {
@@ -129,14 +146,12 @@ int main(int argc, char** argv) {
             sizes[i] = currFileSize;
 
             int workerToSendTo = (i % num_map_workers) + 1;
-            int sizeTag = 1;
-            int fileTag = 2;
 
 #if DEBUG_MASTER
-            std::cout << "Rank (MASTER) Sending File " << filePath << " to MapWorker Rank = " << workerToSendTo << ", SizeTag = " << sizeTag << ", FileTag = " << fileTag << std::endl;
+            std::cout << "Rank (MASTER) Sending File " << filePath << " to MapWorker Rank = " << workerToSendTo << std::endl;
 #endif
-            MPI_Send(&currFileSize, 1, MPI_INT, workerToSendTo, sizeTag, MPI_COMM_WORLD); // size
-            MPI_Send(currFileContents, currFileSize, MPI_CHAR, workerToSendTo, fileTag, MPI_COMM_WORLD); // actual file
+            MPI_Send(&currFileSize, 1, MPI_INT, workerToSendTo, TAG_MASTER_TO_MAP_SIZE, MPI_COMM_WORLD); // size
+            MPI_Send(currFileContents, currFileSize, MPI_CHAR, workerToSendTo, TAG_MASTER_TO_MAP_FILE, MPI_COMM_WORLD); // actual file
         }
 
         /* Receive from reduce workers and write to file */
@@ -144,13 +159,13 @@ int main(int argc, char** argv) {
         myfile.open (output_file_name);
 
         for (int reduceWorkerIdx = 0; reduceWorkerIdx < num_reduce_workers; reduceWorkerIdx++) {
-
+            MPI_Status status;
             int incomingKVSize = 1;
             // Wait for size msg from MPI_ANY_SOURCE
-            MPI_Recv(&incomingKVSize, 1, MPI_INT, MPI_ANY_SOURCE, TAG_MAP_TO_REDUCE_SIZE, MPI_COMM_WORLD, &status);
+            MPI_Recv(&incomingKVSize, 1, MPI_INT, MPI_ANY_SOURCE, TAG_REDUCE_TO_MASTER_SIZE, MPI_COMM_WORLD, &status);
             KeyValue incomingKVs[incomingKVSize]; 
             // then wait for KV array from status.MPI_SOURCE of size msg
-            MPI_Recv(incomingKVs, incomingKVSize, istruct, status.MPI_SOURCE, TAG_COMM_PAIR_LIST, MPI_COMM_WORLD, &status);
+            MPI_Recv(incomingKVs, incomingKVSize, keyValueMsg, status.MPI_SOURCE, TAG_REDUCE_TO_MASTER_DICT, MPI_COMM_WORLD, &status);
             for (int i = 0; i < incomingKVSize; i++) {
                 KeyValue kv = (incomingKVs)[i];
                 myfile << kv.key << " " << kv.val << std::endl;
@@ -168,22 +183,16 @@ int main(int argc, char** argv) {
         int temp = mapWorkerFilesToProcess[mapWorkerIdx];
         /* While this map worker still has stuff to process. */
         while (temp > 0) {
-            int sizeTagToExpect = 1;
-            int fileTagToExpect = 2;
-            //std::cout << "Rank (" << rank << "), Expecting File " << fileIdxToExpect << ", SizeTag = " << sizeTagToExpect << ", FileTag = " << fileTagToExpect << std::endl;
             int size;
+            MPI_Status status;
             char* fileContent;
-            // MPI_Request fileReq;
-            // MPI_Request sizeReq;
-            MPI_Status sizeStatus;
-            MPI_Status fileStatus;
-        
-            MPI_Recv(&size, 1, MPI_INT, MASTER_RANK, sizeTagToExpect, MPI_COMM_WORLD, &sizeStatus);
+
+            MPI_Recv(&size, 1, MPI_INT, MASTER_RANK, TAG_MASTER_TO_MAP_SIZE, MPI_COMM_WORLD, &status);
             
             /* Need to free */
             fileContent = (char*) malloc(size);
 
-            MPI_Recv(fileContent, size, MPI_CHAR, MASTER_RANK, fileTagToExpect, MPI_COMM_WORLD, &fileStatus);
+            MPI_Recv(fileContent, size, MPI_CHAR, MASTER_RANK, TAG_MASTER_TO_MAP_FILE, MPI_COMM_WORLD, &status);
 #if DEBUG_MAP_WORKER
             printf("Rank (%d): Map Worker successfully received file contents\n", rank);
             printf("Rank (%d): Map Worker is working on Mapping File [%d.txt] \n", rank, fileIdxToExpect);
@@ -208,7 +217,7 @@ int main(int argc, char** argv) {
                 }
                 int reduceWorkerRank = reduceWorkerIdx + 1 + num_map_workers;
                 MPI_Send(&sizeOf, 1, MPI_INT, reduceWorkerRank, TAG_MAP_TO_REDUCE_SIZE, MPI_COMM_WORLD); // size
-                MPI_Send(outgoingKVs, sizeOf, istruct, reduceWorkerRank, TAG_COMM_PAIR_LIST, MPI_COMM_WORLD);
+                MPI_Send(outgoingKVs, sizeOf, keyValueMsg, reduceWorkerRank, TAG_MAP_TO_REDUCE_DICT, MPI_COMM_WORLD);
             }
 
 #if DEBUG_MAP_WORKER
@@ -241,6 +250,7 @@ int main(int argc, char** argv) {
 
         // reducer keeps receiving values till all map workers are done
         while (mapWorkersDone < num_map_workers) {
+            MPI_Status status;
             int incomingKVSize = 1;
             // Wait for size msg from MPI_ANY_SOURCE
             MPI_Recv(&incomingKVSize, 1, MPI_INT, MPI_ANY_SOURCE, TAG_MAP_TO_REDUCE_SIZE, MPI_COMM_WORLD, &status);
@@ -251,7 +261,7 @@ int main(int argc, char** argv) {
             }
             KeyValue incomingKVs[incomingKVSize]; 
             // then wait for KV array from status.MPI_SOURCE of size msg
-            MPI_Recv(incomingKVs, incomingKVSize, istruct, status.MPI_SOURCE, TAG_COMM_PAIR_LIST, MPI_COMM_WORLD, &status);
+            MPI_Recv(incomingKVs, incomingKVSize, keyValueMsg, status.MPI_SOURCE, TAG_MAP_TO_REDUCE_DICT, MPI_COMM_WORLD, &status);
             for (int i = 0; i < incomingKVSize; i++) {
                 KeyValue kv = (incomingKVs)[i];
                 std::string key(kv.key);
@@ -267,8 +277,10 @@ int main(int argc, char** argv) {
         // process buffer when all map workers are done
         KeyValue outgoingKVs[buffer.size()];
         int sizeOf = 0;
-        for (const auto&[key, value] : buffer) {
-            char tempKey[8]; // TODO: is hardcoded 8 okay? It is hardcoded in tasks.KeyValue struct
+        for (const auto &iterator : buffer) {
+            auto key = iterator.first;
+            auto value = iterator.second;
+            char tempKey[KEY_LENGTH];
             strcpy(tempKey, key.c_str());
             int tempVals[value.size()];
             for (int i = 0; i < value.size(); i++) {
@@ -281,8 +293,8 @@ int main(int argc, char** argv) {
         }
 
         // send reduced value to master
-        MPI_Send(&sizeOf, 1, MPI_INT, 0, TAG_MAP_TO_REDUCE_SIZE, MPI_COMM_WORLD); // size
-        MPI_Send(outgoingKVs, sizeOf, istruct, 0, TAG_COMM_PAIR_LIST, MPI_COMM_WORLD);
+        MPI_Send(&sizeOf, 1, MPI_INT, 0, TAG_REDUCE_TO_MASTER_SIZE, MPI_COMM_WORLD); // size
+        MPI_Send(outgoingKVs, sizeOf, keyValueMsg, 0, TAG_REDUCE_TO_MASTER_DICT, MPI_COMM_WORLD);
 
 
 #if DEBUG_REDUCE_WORKER
