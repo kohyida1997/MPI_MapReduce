@@ -1,7 +1,7 @@
 #define DEBUG_WORK_DISTRIBUTION 0
-#define DEBUG_MAP_WORKER 1
+#define DEBUG_MAP_WORKER 0
 #define DEBUG_MASTER 0
-#define DEBUG_REDUCE_WORKER 1
+#define DEBUG_REDUCE_WORKER 0
 
 #define KEY_LENGTH 8 // use hardcoded value from tasks.h // char key[8];
 #define TAG_MASTER_TO_MAP_SIZE 1
@@ -173,6 +173,10 @@ int main(int argc, char** argv) {
         }
         myfile.close();
 
+        /* Free all memory allocated for files. */
+        for (int i = 0; i < num_files; i++)
+            free(filePtrs[i]);
+
 #if DEBUG_MASTER
         printf("Rank (MASTER): Master is Done\n");
 #endif
@@ -226,6 +230,7 @@ int main(int argc, char** argv) {
             free_map_task_output(res);
             fileIdxToExpect += num_map_workers;
             temp--;
+            free(fileContent);
         }
 
         /* 

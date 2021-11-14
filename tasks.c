@@ -10,9 +10,7 @@
  * Note: remember to free the returned MapTaskOutput* with
  * `free_map_task_output`
  * */
-
- 
-extern MapTaskOutput* map1(char *file_contents) {
+MapTaskOutput* map1(char *file_contents) {
     int len = strlen(file_contents);
     int num_letters = 0;
     int num_numbers = 0;
@@ -52,7 +50,7 @@ extern MapTaskOutput* map1(char *file_contents) {
  * Note: remember to free the returned MapTaskOutput* with
  * `free_map_task_output`
  * */
-extern MapTaskOutput* map2(char *file_contents) {
+MapTaskOutput* map2(char *file_contents) {
     int len = strlen(file_contents);
     MapTaskOutput *output = (MapTaskOutput *)malloc(sizeof(MapTaskOutput));
     KeyValue *kvs = (KeyValue *)malloc(sizeof(KeyValue) * 26);
@@ -97,7 +95,7 @@ extern MapTaskOutput* map2(char *file_contents) {
  * Note: remember to free the returned MapTaskOutput* with
  * `free_map_task_output`
  * */
-extern MapTaskOutput* map3(char *file_contents) {
+MapTaskOutput* map3(char *file_contents) {
     int len = strlen(file_contents);
     int count = len % 49;
 
@@ -136,7 +134,7 @@ extern MapTaskOutput* map3(char *file_contents) {
 
 /* Helper function to free the `MapTaskOutput*` returned by 
  * the various map functions. */
-extern void free_map_task_output(MapTaskOutput *output) {
+void free_map_task_output(MapTaskOutput *output) {
     free(output->kvs);
     free(output);
     return;
@@ -148,7 +146,7 @@ extern void free_map_task_output(MapTaskOutput *output) {
  * `vals`: int array (aggregate all KeyValue.val into an array)
  * `len`: length of `vals`
  * */
-extern KeyValue reduce(char key[8], int *vals, int len) {
+KeyValue reduce(char key[8], int *vals, int len) {
     int i;
     int sum = 0;
     for (i = 0; i < len; i++) {
